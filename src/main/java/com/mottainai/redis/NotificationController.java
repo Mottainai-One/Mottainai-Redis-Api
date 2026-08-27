@@ -46,14 +46,14 @@ public class NotificationController {
             if (!"PONG".equals(connection.ping())) throw new IllegalStateException();
             return Map.of("status", "ready");
         } catch (RuntimeException exception) {
-            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Redis indisponível.");
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Redis unavailable.");
         }
     }
 
     @GetMapping("/v1/notifications")
     public InboxResponse list(@RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false) String authorization,
                               @RequestParam(defaultValue = "20") int limit) {
-        if (limit < 1 || limit > 100) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "limit deve estar entre 1 e 100.");
+        if (limit < 1 || limit > 100) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "limit must be between 1 and 100.");
         AuthService.Principal principal = auth.principal(authorization);
         var ids = redis.opsForZSet().reverseRange(inboxKey(principal), 0, limit - 1);
         List<NotificationResponse> notifications = new ArrayList<>();
@@ -70,16 +70,16 @@ public class NotificationController {
     public Map<String, String> markRead(@RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false) String authorization,
                                         @PathVariable String notificationId) {
         if (notificationId.isBlank() || notificationId.contains(":") || notificationId.length() > 128)
-            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Identificador inválido.");
+            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Invalid identifier.");
         AuthService.Principal principal = auth.principal(authorization);
         Long result = redis.execute(MARK_AS_READ, List.of(inboxKey(principal), notificationKey(principal, notificationId), unreadKey(principal)), notificationId);
-        if (result == null || result == -1) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Notificação não encontrada.");
+        if (result == null || result == -1) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Notification not found.");
         return Map.of("id", notificationId, "status", "read");
     }
 
-    private static String inboxKey(AuthService.Principal p) { return PREFIX + "inbox:" + p.empresaId() + ":" + p.usuarioId(); }
-    private static String unreadKey(AuthService.Principal p) { return PREFIX + "unread:" + p.empresaId() + ":" + p.usuarioId(); }
-    private static String notificationKey(AuthService.Principal p, String id) { return PREFIX + "data:" + p.empresaId() + ":" + p.usuarioId() + ":" + id; }
+    private static String inboxKey(AuthService.Principal p) { return PREFIX + "inbox:" + p.companyId() + ":" + p.userId(); }
+    private static String unreadKey(AuthService.Principal p) { return PREFIX + "unread:" + p.companyId() + ":" + p.userId(); }
+    private static String notificationKey(AuthService.Principal p, String id) { return PREFIX + "data:" + p.companyId() + ":" + p.userId() + ":" + id; }
     private static String value(Map<Object, Object> data, String key) { return data.get(key).toString(); }
 
     public record InboxResponse(int unreadCount, List<NotificationResponse> notifications) {}
