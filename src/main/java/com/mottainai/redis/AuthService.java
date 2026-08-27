@@ -19,7 +19,7 @@ public class AuthService {
     public AuthService(@Value("${mottainai.jwt.secret}") String secret,
                        @Value("${mottainai.jwt.algorithm}") String algorithm) {
         if (secret.length() < 32 || !"HS256".equals(algorithm)) {
-            throw new IllegalStateException("JWT_SECRET inválido ou algoritmo não suportado.");
+            throw new IllegalStateException("Invalid JWT_SECRET or unsupported algorithm.");
         }
         key = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
     }
@@ -32,19 +32,19 @@ public class AuthService {
             if (claims.getExpiration() == null) {
                 throw unauthorized();
             }
-            long usuarioId = Long.parseLong(claims.getSubject());
-            long empresaId = Long.parseLong(claims.get("empresa_id").toString());
+            long userId = Long.parseLong(claims.getSubject());
+            long companyId = Long.parseLong(claims.get("empresa_id").toString());
             String role = claims.get("role", String.class).toUpperCase();
-            if (usuarioId < 1 || empresaId < 1 || !ROLES.contains(role)) throw unauthorized();
-            return new Principal(usuarioId, empresaId, role);
+            if (userId < 1 || companyId < 1 || !ROLES.contains(role)) throw unauthorized();
+            return new Principal(userId, companyId, role);
         } catch (RuntimeException exception) {
             throw unauthorized();
         }
     }
 
     private ResponseStatusException unauthorized() {
-        return new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Token de acesso inválido.");
+        return new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid access token.");
     }
 
-    public record Principal(long usuarioId, long empresaId, String role) {}
+    public record Principal(long userId, long companyId, String role) {}
 }

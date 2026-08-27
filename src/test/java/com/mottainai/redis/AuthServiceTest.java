@@ -27,8 +27,8 @@ class AuthServiceTest {
 
         AuthService.Principal principal = auth.principal("Bearer " + token);
 
-        assertEquals(10, principal.usuarioId());
-        assertEquals(1, principal.empresaId());
+        assertEquals(10, principal.userId());
+        assertEquals(1, principal.companyId());
         assertEquals("ESTOQUISTA", principal.role());
     }
 
