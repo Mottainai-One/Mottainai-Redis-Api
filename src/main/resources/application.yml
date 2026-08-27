@@ -1,0 +1,12 @@
+server:
+  address: 0.0.0.0
+  port: 8080
+spring:
+  data:
+    redis:
+      url: ${REDIS_URL}
+      timeout: 2s
+mottainai:
+  jwt:
+    secret: ${JWT_SECRET}
+    algorithm: ${JWT_ALGORITHM:HS256}
