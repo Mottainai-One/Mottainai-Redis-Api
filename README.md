@@ -1,59 +1,28 @@
-# Mottainai Redis Mobile API — Java
+# Mottainai — Redis Mobile API
 
-API **Spring Boot 3.4.2 / Java 17**. It is a read-only facade for the mobile app to securely consume notifications; the mobile app never accesses Redis directly.
+Essa API é a API feita em REDIS para as notificações do aplicativo Mottainai. 
 
-## API scope
+Construída com Java 17 e Spring Boot 3.4.2, ela atua exclusivamente como uma fachada de leitura (read-only facade). O seu principal objetivo é permitir que o aplicativo mobile consuma e gerencie o estado das notificações (como alertas de queima de estoque ou mensagens operacionais) de forma totalmente segura, garantindo que o dispositivo móvel nunca tenha acesso direto ao banco de dados Redis.  
 
-| Endpoint | Scope |
+## 🔒 Segurança e Infraestrutura
+
+A arquitetura foi desenhada para evitar qualquer tipo de manipulação ou forja de alertas por parte do cliente:
+
+* **Autenticação Restrita:** Utiliza tokens JWT Bearer HS256 (com secret de no mínimo 32 caracteres).
+* **Claims Obrigatórios:** O token deve conter obrigatoriamente `exp`, `sub`, `empresa_id` e `role`.
+* **Controle de Perfis:** A API aceita requisições apenas dos perfis `CLIENTE`, `ESTOQUISTA`, `GERENTE` e `DONO`.
+* **Isolamento Multi-tenant:** Os dados de identificação (empresa e usuário) são extraídos exclusivamente do token JWT. O cliente não pode forjar acessos passando parâmetros no corpo da requisição.
+* **Topologia de Rede:** O banco Redis vive protegido dentro da rede interna do Docker (`mottainai-redis-network`). A API é a única ponte e expõe comunicação apenas localmente (`127.0.0.1:8080`).
+
+## 🗂️ Escopo e Endpoints
+
+**Nota Arquitetural:** Esta API não cria notificações recebendo chamadas HTTP externas. A criação de alertas é de responsabilidade exclusiva do Backend principal do Mottainai ou via scripts internos de teste. Isso garante que o app mobile não consiga inventar falsos avisos operacionais.
+
+Os endpoints expostos são focados estritamente na leitura e controle de estado:
+
+| Endpoint | Ação / Propósito |
 |---|---|
-| `GET /livez` | The Java process is alive; does not access Redis. |
-| `GET /readyz` | Redis is reachable. |
-| `GET /v1/notifications?limit=20` | Lists the authenticated user's notifications and the unread total. |
-| `POST /v1/notifications/{id}/read` | Marks as read; can be called again without duplicating the effect. |
-
-It **does not create notifications over HTTP**. Creation is done by the Mottainai backend or by the test script `mottainai-redis-cli/inserir-notificacao.ps1`. This prevents a mobile app from being able to forge operational alerts.
-
-## Security
-
-- JWT Bearer HS256 with a secret of at least 32 characters;
-- requires `exp`, `sub`, `empresa_id` and `role`;
-- only accepts `CLIENTE`, `ESTOQUISTA`, `GERENTE` and `DONO`;
-- company and user come exclusively from the token;
-- Redis lives on the internal Docker network `mottainai-redis-network`;
-- the API only exposes the port on `127.0.0.1:8080`.
-
-## Running on Windows
-
-First bring up the single Redis instance:
-
-```powershell
-cd "$HOME\Documents\mottainai-redis"
-.\start-redis.ps1
-```
-
-Then configure and start the Java API:
-
-```powershell
-cd "$HOME\Documents\mottainai-redis-mobile-api"
-Copy-Item .env.example .env
-notepad .env
-# REDIS_URL: use the same password as mottainai-redis.
-# JWT_SECRET: use the same secret as the main API.
-docker compose up --build -d
-```
-
-Check it:
-
-```powershell
-curl http://127.0.0.1:8080/livez
-curl http://127.0.0.1:8080/readyz
-```
-
-Logs and shutdown:
-
-```powershell
-docker compose logs -f mobile-api
-docker compose down
-```
-
-Do not commit `.env`.
+| `GET /livez` | Healthcheck básico. Confirma que o processo Java está vivo (não acessa o Redis). |
+| `GET /readyz` | Healthcheck de infraestrutura. Confirma que o banco Redis está acessível e respondendo. |
+| `GET /v1/notifications?limit=20` | Lista as notificações pertencentes ao usuário autenticado e retorna o total de mensagens não lidas. |
+| `POST /v1/notifications/{id}/read` | Marca uma notificação como lida. É uma operação idempotente (pode ser chamada múltiplas vezes sem duplicar ou corromper o estado). |
