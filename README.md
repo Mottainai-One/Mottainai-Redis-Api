@@ -26,3 +26,33 @@ Os endpoints expostos são focados estritamente na leitura e controle de estado:
 | `GET /readyz` | Healthcheck de infraestrutura. Confirma que o banco Redis está acessível e respondendo. |
 | `GET /v1/notifications?limit=20` | Lista as notificações pertencentes ao usuário autenticado e retorna o total de mensagens não lidas. |
 | `POST /v1/notifications/{id}/read` | Marca uma notificação como lida. É uma operação idempotente (pode ser chamada múltiplas vezes sem duplicar ou corromper o estado). |
+
+## 🤖 Ingestão via Redis Stream (serviço de IA)
+
+A criação de notificações continua **fora do HTTP**. O serviço de IA publica em um Redis Stream e a API consome com um *consumer group*, gravando no formato que o app lê. Como o Stream só é alcançável dentro da rede Docker e exige a senha do Redis, o app mobile continua sem conseguir forjar alertas.
+
+**Stream:** `mottainai:v1:notification:stream` · **Consumer group:** `notification-writers`
+
+| Campo | Obrigatório | Regra |
+|---|---|---|
+| `company_id` | sim | inteiro positivo |
+| `user_id` | sim | inteiro positivo |
+| `title` | sim | até 120 caracteres |
+| `body` | sim | até 1000 caracteres |
+| `priority` | sim | `1`, `2` ou `3` |
+| `id` | não | sem `:`, até 128 caracteres; gerado automaticamente se ausente |
+
+Exemplo de publicação:
+
+```bash
+XADD mottainai:v1:notification:stream * \
+  company_id 1 user_id 301 priority 3 \
+  title "Sugestao da IA: promocao no setor 3" \
+  body "Modelo identificou 12 itens com risco de perda em 48h."
+```
+
+A escrita é atômica (hash, inbox e contador de não lidas em um único script Lua) e idempotente por `id`. Mensagens malformadas são descartadas com log e confirmadas (`XACK`), para não ficarem em redelivery infinito nem corromper o caminho de leitura.
+
+## ⚙️ Configuração do Redis
+
+O container roda com `--appendonly yes` (persistência), `--maxmemory 256mb` e `--maxmemory-policy volatile-lru`. O limite evita que o cache do serviço de IA cresça sem teto e derrube o container por falta de memória; como todas as chaves têm TTL, a política despeja as menos usadas antes de chegar nesse ponto.

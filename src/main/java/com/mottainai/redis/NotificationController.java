@@ -18,7 +18,6 @@ import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 public class NotificationController {
-    private static final String PREFIX = "mottainai:v1:notification:";
     private static final DefaultRedisScript<Long> MARK_AS_READ = new DefaultRedisScript<>("""
         if redis.call('ZSCORE', KEYS[1], ARGV[1]) == false then return -1 end
         if redis.call('HGET', KEYS[2], 'status') == 'read' then return 2 end
@@ -77,9 +76,9 @@ public class NotificationController {
         return Map.of("id", notificationId, "status", "read");
     }
 
-    private static String inboxKey(AuthService.Principal p) { return PREFIX + "inbox:" + p.companyId() + ":" + p.userId(); }
-    private static String unreadKey(AuthService.Principal p) { return PREFIX + "unread:" + p.companyId() + ":" + p.userId(); }
-    private static String notificationKey(AuthService.Principal p, String id) { return PREFIX + "data:" + p.companyId() + ":" + p.userId() + ":" + id; }
+    private static String inboxKey(AuthService.Principal p) { return NotificationKeys.inbox(p.companyId(), p.userId()); }
+    private static String unreadKey(AuthService.Principal p) { return NotificationKeys.unread(p.companyId(), p.userId()); }
+    private static String notificationKey(AuthService.Principal p, String id) { return NotificationKeys.data(p.companyId(), p.userId(), id); }
     private static String value(Map<Object, Object> data, String key) { return data.get(key).toString(); }
 
     public record InboxResponse(int unreadCount, List<NotificationResponse> notifications) {}
