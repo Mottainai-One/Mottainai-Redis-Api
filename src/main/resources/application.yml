@@ -10,3 +10,7 @@ mottainai:
   jwt:
     secret: ${JWT_SECRET}
     algorithm: ${JWT_ALGORITHM:HS256}
+  stream:
+    key: ${NOTIFICATION_STREAM_KEY:mottainai:v1:notification:stream}
+    group: ${NOTIFICATION_STREAM_GROUP:notification-writers}
+    consumer: ${HOSTNAME:mobile-api}
