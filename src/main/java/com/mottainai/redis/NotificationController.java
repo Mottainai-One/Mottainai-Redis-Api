@@ -69,7 +69,7 @@ public class NotificationController {
         List<NotificationResponse> notifications = new ArrayList<>();
         for (int i = 1; i < result.size(); i++) {
             List<?> fields = (List<?>) result.get(i);
-            Map<Object, Object> data = new java.util.HashMap<>();
+            Map<Object, Object> data = new java.util.HashMap<>(fields.size() / 2, 1.0f);
             for (int j = 0; j < fields.size(); j += 2) data.put(fields.get(j), fields.get(j + 1));
             notifications.add(new NotificationResponse(value(data, "id"), value(data, "title"), value(data, "body"),
                     Integer.parseInt(value(data, "priority")), value(data, "status"), Long.parseLong(value(data, "created_at"))));
