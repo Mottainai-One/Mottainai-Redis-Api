@@ -40,7 +40,7 @@ A criação de notificações continua **fora do HTTP**. O serviço de IA public
 | `title` | sim | até 120 caracteres |
 | `body` | sim | até 1000 caracteres |
 | `priority` | sim | `1`, `2` ou `3` |
-| `id` | não | sem `:`, até 128 caracteres; gerado automaticamente se ausente |
+| `id` | não | sem `:`, até 128 caracteres; se ausente, usa `stream-<ID do registro>` |
 
 Exemplo de publicação:
 
@@ -53,6 +53,16 @@ XADD mottainai:v1:notification:stream * \
 
 A escrita é atômica (hash, inbox e contador de não lidas em um único script Lua) e idempotente por `id`. Mensagens malformadas são descartadas com log e confirmadas (`XACK`), para não ficarem em redelivery infinito nem corromper o caminho de leitura.
 
+Reenviar um ID ainda existente preserva conteúdo, status de leitura, data e TTL. Sem `id`, o identificador derivado do registro do Stream evita duplicar a notificação ao recuperar a mesma entrega; duas publicações distintas continuam sendo duas notificações. A deduplicação dura enquanto o hash existir (normalmente sete dias).
+
+O consumidor consulta lotes de até 100 mensagens a cada segundo e recupera entregas pendentes com `XPENDING` e `XCLAIM`. O tempo mínimo sem atividade é configurável por `NOTIFICATION_STREAM_RECLAIM_IDLE_MS` (padrão: 60000 ms). Falhas de escrita ou de confirmação mantêm a mensagem pendente para nova tentativa. O grupo e o Stream são criados na inicialização, inclusive em um Redis vazio; erros diferentes de `BUSYGROUP` interrompem a inicialização.
+
+A listagem, a criação e a marcação como lida reconciliam o índice e o contador com os hashes existentes em Lua. Referências expiradas não ocupam o limite de resultados nem contam como não lidas. O TTL dos hashes não é renovado pela leitura. A reconciliação percorre a caixa inteira do usuário, portanto seu custo cresce com o número de notificações ainda indexadas.
+
+## Testes
+
+Execute `mvn verify` para os testes unitários. Para executar também os testes de integração, disponibilize um Redis exclusivo para testes e configure `REDIS_TEST_HOST` e, se necessário, `REDIS_TEST_PORT` (padrão: 6379). Os testes usam chaves próprias e não exigem o `.env` da aplicação. O GitHub Actions executa as duas suítes com Redis 7.2.5.
+
 ## ⚙️ Configuração do Redis
 
-O container roda com `--appendonly yes` (persistência), `--maxmemory 256mb` e `--maxmemory-policy volatile-lru`. O limite evita que o cache do serviço de IA cresça sem teto e derrube o container por falta de memória; como todas as chaves têm TTL, a política despeja as menos usadas antes de chegar nesse ponto.
+O Redis do ambiente deve ser provisionado separadamente na rede externa `mottainai-redis-network`. No ambiente inspecionado, ele usa `--appendonly yes` (persistência), `--maxmemory 256mb` e `--maxmemory-policy volatile-lru`. Essa política permite remover chaves com TTL antes do prazo quando há pressão de memória; ela não protege notificações ou locks contra remoção antecipada. O Stream não recebe TTL nem é compactado automaticamente por esta API, por isso seu crescimento deve ser monitorado e sua retenção deve considerar entregas pendentes. Este repositório configura somente o container da API, sem alterar a instância Redis compartilhada.

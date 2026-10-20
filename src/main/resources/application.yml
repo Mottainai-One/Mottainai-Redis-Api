@@ -14,3 +14,4 @@ mottainai:
     key: ${NOTIFICATION_STREAM_KEY:mottainai:v1:notification:stream}
     group: ${NOTIFICATION_STREAM_GROUP:notification-writers}
     consumer: ${HOSTNAME:mobile-api}
+    reclaim-idle-ms: ${NOTIFICATION_STREAM_RECLAIM_IDLE_MS:60000}

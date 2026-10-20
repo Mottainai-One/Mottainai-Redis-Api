@@ -8,17 +8,18 @@ import org.springframework.stereotype.Service;
 
 @Service
 public class NotificationWriter {
-    // Hash, inbox and unread counter move together so a partial failure cannot leave a
-    // notification that is visible but uncounted. Re-writing the same id is idempotent.
-    private static final DefaultRedisScript<Long> WRITE = new DefaultRedisScript<>("""
-        local is_new = redis.call('EXISTS', KEYS[1]) == 0
-        redis.call('HSET', KEYS[1], 'id', ARGV[1], 'title', ARGV[2], 'body', ARGV[3], 'priority', ARGV[4], 'status', 'unread', 'created_at', ARGV[5])
-        redis.call('EXPIRE', KEYS[1], ARGV[6])
-        redis.call('ZADD', KEYS[2], ARGV[7], ARGV[1])
-        redis.call('EXPIRE', KEYS[2], ARGV[6])
-        if is_new then redis.call('INCR', KEYS[3]) end
-        redis.call('EXPIRE', KEYS[3], ARGV[6])
-        return tonumber(redis.call('GET', KEYS[3]) or '0')
+    // Serialize creation and reconciliation with readers. Replaying a live ID preserves
+    // its payload, read status, timestamp and expiry.
+    private static final DefaultRedisScript<Long> WRITE = new DefaultRedisScript<>(NotificationScripts.RECONCILE + """
+        if redis.call('EXISTS', KEYS[1]) == 0 then
+            redis.call('HSET', KEYS[1], 'id', ARGV[1], 'title', ARGV[2], 'body', ARGV[3], 'priority', ARGV[4], 'status', 'unread', 'created_at', ARGV[5])
+            redis.call('EXPIRE', KEYS[1], ARGV[6])
+        end
+        local priority = tonumber(redis.call('HGET', KEYS[1], 'priority'))
+        local created = tonumber(redis.call('HGET', KEYS[1], 'created_at'))
+        redis.call('ZADD', KEYS[2], 'NX', priority * tonumber(ARGV[7]) + created, ARGV[1])
+        local active, unread = reconcile(KEYS[2], KEYS[3], ARGV[8])
+        return unread
         """, Long.class);
 
     private final StringRedisTemplate redis;
@@ -35,6 +36,7 @@ public class NotificationWriter {
                 NotificationKeys.unread(companyId, userId));
         redis.execute(WRITE, keys, notificationId, title, body, String.valueOf(priority),
                 String.valueOf(createdAt), String.valueOf(NotificationKeys.TTL_SECONDS),
-                String.valueOf(NotificationKeys.score(priority, createdAt)));
+                String.valueOf(NotificationKeys.PRIORITY_WEIGHT),
+                NotificationKeys.data(companyId, userId, ""));
     }
 }

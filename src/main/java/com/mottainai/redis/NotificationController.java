@@ -18,13 +18,22 @@ import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 public class NotificationController {
-    private static final DefaultRedisScript<Long> MARK_AS_READ = new DefaultRedisScript<>("""
+    private static final DefaultRedisScript<List> LIST = new DefaultRedisScript<>(NotificationScripts.RECONCILE + """
+        local active, unread = reconcile(KEYS[1], KEYS[2], ARGV[1])
+        local result = {tostring(unread)}
+        for i = 1, math.min(#active, tonumber(ARGV[2])) do
+            table.insert(result, redis.call('HGETALL', ARGV[1] .. active[i]))
+        end
+        return result
+        """, List.class);
+
+    private static final DefaultRedisScript<Long> MARK_AS_READ = new DefaultRedisScript<>(NotificationScripts.RECONCILE + """
+        reconcile(KEYS[1], KEYS[3], ARGV[2])
         if redis.call('ZSCORE', KEYS[1], ARGV[1]) == false then return -1 end
         if redis.call('HGET', KEYS[2], 'status') == 'read' then return 2 end
         if redis.call('HGET', KEYS[2], 'status') ~= 'unread' then return -1 end
         redis.call('HSET', KEYS[2], 'status', 'read')
-        local current = tonumber(redis.call('GET', KEYS[3]) or '0')
-        if current > 0 then redis.call('DECR', KEYS[3]) end
+        reconcile(KEYS[1], KEYS[3], ARGV[2])
         return 1
         """, Long.class);
 
@@ -54,15 +63,18 @@ public class NotificationController {
                               @RequestParam(defaultValue = "20") int limit) {
         if (limit < 1 || limit > 100) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "limit must be between 1 and 100.");
         AuthService.Principal principal = auth.principal(authorization);
-        var ids = redis.opsForZSet().reverseRange(inboxKey(principal), 0, limit - 1);
+        List<?> result = redis.execute(LIST, List.of(inboxKey(principal), unreadKey(principal)),
+                notificationKey(principal, ""), String.valueOf(limit));
+        if (result == null) throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Redis unavailable.");
         List<NotificationResponse> notifications = new ArrayList<>();
-        if (ids != null) for (String id : ids) {
-            Map<Object, Object> data = redis.opsForHash().entries(notificationKey(principal, id));
-            if (!data.isEmpty()) notifications.add(new NotificationResponse(id, value(data, "title"), value(data, "body"),
+        for (int i = 1; i < result.size(); i++) {
+            List<?> fields = (List<?>) result.get(i);
+            Map<Object, Object> data = new java.util.HashMap<>();
+            for (int j = 0; j < fields.size(); j += 2) data.put(fields.get(j), fields.get(j + 1));
+            notifications.add(new NotificationResponse(value(data, "id"), value(data, "title"), value(data, "body"),
                     Integer.parseInt(value(data, "priority")), value(data, "status"), Long.parseLong(value(data, "created_at"))));
         }
-        String unread = redis.opsForValue().get(unreadKey(principal));
-        return new InboxResponse(unread == null ? 0 : Integer.parseInt(unread), notifications);
+        return new InboxResponse(Integer.parseInt(result.get(0).toString()), notifications);
     }
 
     @PostMapping("/v1/notifications/{notificationId}/read")
@@ -71,7 +83,8 @@ public class NotificationController {
         if (notificationId.isBlank() || notificationId.contains(":") || notificationId.length() > 128)
             throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Invalid identifier.");
         AuthService.Principal principal = auth.principal(authorization);
-        Long result = redis.execute(MARK_AS_READ, List.of(inboxKey(principal), notificationKey(principal, notificationId), unreadKey(principal)), notificationId);
+        Long result = redis.execute(MARK_AS_READ, List.of(inboxKey(principal), notificationKey(principal, notificationId), unreadKey(principal)),
+                notificationId, notificationKey(principal, ""));
         if (result == null || result == -1) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Notification not found.");
         return Map.of("id", notificationId, "status", "read");
     }
