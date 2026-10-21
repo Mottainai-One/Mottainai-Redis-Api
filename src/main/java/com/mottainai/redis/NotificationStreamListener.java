@@ -4,19 +4,22 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import java.time.Duration;
 import java.util.Map;
-import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.connection.stream.Consumer;
 import org.springframework.data.redis.connection.stream.MapRecord;
+import org.springframework.data.redis.connection.stream.RecordId;
 import org.springframework.data.redis.connection.stream.ReadOffset;
+import org.springframework.data.redis.connection.stream.StreamReadOptions;
 import org.springframework.data.redis.connection.stream.StreamOffset;
+import org.springframework.data.domain.Range;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.serializer.RedisSerializer;
 import org.springframework.data.redis.stream.StreamListener;
-import org.springframework.data.redis.stream.StreamMessageListenerContainer;
 import org.springframework.stereotype.Component;
 
 /**
@@ -29,76 +32,113 @@ public class NotificationStreamListener implements StreamListener<String, MapRec
     private static final Logger log = LoggerFactory.getLogger(NotificationStreamListener.class);
 
     private final StringRedisTemplate redis;
-    private final RedisConnectionFactory connectionFactory;
     private final NotificationWriter writer;
     private final String streamKey;
     private final String group;
     private final String consumer;
 
-    private StreamMessageListenerContainer<String, MapRecord<String, String, String>> container;
+    private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
+    private final Duration reclaimIdle;
+    private String pendingCursor;
 
     public NotificationStreamListener(StringRedisTemplate redis,
-                                      RedisConnectionFactory connectionFactory,
                                       NotificationWriter writer,
                                       @Value("${mottainai.stream.key}") String streamKey,
                                       @Value("${mottainai.stream.group}") String group,
-                                      @Value("${mottainai.stream.consumer}") String consumer) {
+                                      @Value("${mottainai.stream.consumer}") String consumer,
+                                      @Value("${mottainai.stream.reclaim-idle-ms:60000}") long reclaimIdleMillis) {
         this.redis = redis;
-        this.connectionFactory = connectionFactory;
         this.writer = writer;
         this.streamKey = streamKey;
         this.group = group;
         this.consumer = consumer;
+        if (reclaimIdleMillis < 1) throw new IllegalArgumentException("reclaim-idle-ms must be positive");
+        this.reclaimIdle = Duration.ofMillis(reclaimIdleMillis);
     }
 
     @PostConstruct
     void start() {
         createGroupIfMissing();
-        // Must stay below spring.data.redis.timeout, otherwise the blocking read races the
-        // client command timeout and every poll fails.
-        var options = StreamMessageListenerContainer
-                .StreamMessageListenerContainerOptions.builder()
-                .pollTimeout(Duration.ofSeconds(1))
-                .serializer(RedisSerializer.string())
-                .build();
-        container = StreamMessageListenerContainer.create(connectionFactory, options);
-        container.receive(Consumer.from(group, consumer),
-                StreamOffset.create(streamKey, ReadOffset.lastConsumed()), this);
-        container.start();
+        executor.scheduleWithFixedDelay(this::poll, 0, 1, TimeUnit.SECONDS);
         log.info("Listening on stream {} as {}/{}", streamKey, group, consumer);
     }
 
     @PreDestroy
     void stop() {
-        if (container != null) container.stop();
+        executor.shutdownNow();
     }
 
-    private void createGroupIfMissing() {
+    void createGroupIfMissing() {
         try {
-            redis.opsForStream().createGroup(streamKey, ReadOffset.from("0-0"), group);
+            redis.execute((RedisCallback<String>) connection -> connection.streamCommands().xGroupCreate(
+                    redis.getStringSerializer().serialize(streamKey), group, ReadOffset.from("0-0"), true));
         } catch (RuntimeException exception) {
-            log.debug("Consumer group {} already exists on {}", group, streamKey);
+            for (Throwable cause = exception; cause != null; cause = cause.getCause()) {
+                if (cause.getMessage() != null && cause.getMessage().startsWith("BUSYGROUP ")) return;
+            }
+            throw exception;
+        }
+    }
+
+    // Scan bounded pages, advancing the cursor even when recent entries cannot yet be
+    // claimed. This prevents a busy first page from starving older failed deliveries.
+    void poll() {
+        try {
+            Range<String> range = pendingCursor == null ? Range.unbounded()
+                    : Range.of(Range.Bound.exclusive(pendingCursor), Range.Bound.unbounded());
+            var pending = redis.opsForStream().pending(streamKey, group, range, 100);
+            if (pending != null) {
+                for (var entry : pending) {
+                    pendingCursor = entry.getIdAsString();
+                    if (entry.getElapsedTimeSinceLastDelivery().compareTo(reclaimIdle) >= 0) {
+                        var claimed = redis.<String, String>opsForStream().claim(streamKey, group, consumer,
+                                reclaimIdle, RecordId.of(entry.getIdAsString()));
+                        for (var message : claimed) process(message);
+                    }
+                }
+                if (pending.size() < 100) pendingCursor = null;
+            }
+            var messages = redis.<String, String>opsForStream().read(Consumer.from(group, consumer),
+                    StreamReadOptions.empty().count(100), StreamOffset.create(streamKey, ReadOffset.lastConsumed()));
+            if (messages != null) for (var message : messages) process(message);
+        } catch (RuntimeException exception) {
+            log.error("Notification stream poll failed; retrying on the next poll", exception);
+        }
+    }
+
+    private void process(MapRecord<String, String, String> message) {
+        try {
+            onMessage(message);
+        } catch (RuntimeException exception) {
+            log.error("Notification stream message {} remains pending for retry", message.getId(), exception);
         }
     }
 
     @Override
     public void onMessage(MapRecord<String, String, String> message) {
         Map<String, String> fields = message.getValue();
+        long companyId;
+        long userId;
+        String title;
+        String body;
+        int priority;
+        String notificationId;
         try {
-            long companyId = positive(fields.get("company_id"), "company_id");
-            long userId = positive(fields.get("user_id"), "user_id");
-            String title = required(fields.get("title"), "title", 120);
-            String body = required(fields.get("body"), "body", 1000);
-            int priority = priority(fields.get("priority"));
-            String notificationId = notificationId(fields.get("id"));
-
-            writer.write(companyId, userId, notificationId, title, body, priority);
-            log.info("Notification {} written for company {} user {}", notificationId, companyId, userId);
+            companyId = positive(fields.get("company_id"), "company_id");
+            userId = positive(fields.get("user_id"), "user_id");
+            title = required(fields.get("title"), "title", 120);
+            body = required(fields.get("body"), "body", 1000);
+            priority = priority(fields.get("priority"));
+            notificationId = notificationId(fields.get("id"), message.getId().getValue());
         } catch (IllegalArgumentException exception) {
             // A malformed message never becomes valid, so acknowledge it instead of
             // redelivering it forever. Bad data here would break the read path.
             log.warn("Discarding malformed stream message {}: {}", message.getId(), exception.getMessage());
+            redis.opsForStream().acknowledge(streamKey, group, message.getId());
+            return;
         }
+        writer.write(companyId, userId, notificationId, title, body, priority);
+        log.info("Notification {} written for company {} user {}", notificationId, companyId, userId);
         redis.opsForStream().acknowledge(streamKey, group, message.getId());
     }
 
@@ -124,8 +164,8 @@ public class NotificationStreamListener implements StreamListener<String, MapRec
         return value;
     }
 
-    private static String notificationId(String raw) {
-        if (raw == null || raw.isBlank()) return UUID.randomUUID().toString().replace("-", "");
+    private static String notificationId(String raw, String streamId) {
+        if (raw == null || raw.isBlank()) return "stream-" + streamId;
         String value = raw.trim();
         if (value.contains(":") || value.length() > 128) throw new IllegalArgumentException("invalid id");
         return value;
