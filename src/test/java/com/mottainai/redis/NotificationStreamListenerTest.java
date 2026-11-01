@@ -19,9 +19,10 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 class NotificationStreamListenerTest {
     private final StringRedisTemplate redis = mock(StringRedisTemplate.class);
     private final NotificationWriter writer = mock(NotificationWriter.class);
+    private final NotificationStreamMaintenance maintenance = mock(NotificationStreamMaintenance.class);
     private final StreamOperations<String, String, String> streams = mock(StreamOperations.class);
     private final NotificationStreamListener listener =
-            new NotificationStreamListener(redis, writer, "stream", "group", "consumer", 60000);
+            new NotificationStreamListener(redis, writer, maintenance, "stream", "group", "consumer", 60000);
 
     @AfterEach
     void stop() { listener.stop(); }
@@ -42,7 +43,7 @@ class NotificationStreamListenerTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"company_id", "user_id", "title", "body", "priority", "id"})
-    void acknowledgesInvalidFieldsWithoutWriting(String field) {
+    void deadLettersInvalidFieldsWithoutWriting(String field) {
         when(redis.<String, String>opsForStream()).thenReturn(streams);
         Map<String, String> fields = new HashMap<>(Map.of("company_id", "1", "user_id", "10",
                 "title", "Title", "body", "Body", "priority", "2", "id", "valid"));
@@ -54,7 +55,8 @@ class NotificationStreamListenerTest {
         var message = MapRecord.create("stream", fields).withId(RecordId.of("1-0"));
         listener.onMessage(message);
         verifyNoInteractions(writer);
-        verify(streams).acknowledge("stream", "group", message.getId());
+        verify(maintenance).deadLetter(eq(message), startsWith("invalid_payload:"), eq(1L));
+        verifyNoInteractions(streams);
     }
 
     @Test
