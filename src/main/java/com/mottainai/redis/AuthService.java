@@ -4,6 +4,7 @@ import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.Set;
 import java.util.Locale;
 import javax.crypto.SecretKey;
@@ -19,10 +20,18 @@ public class AuthService {
 
     public AuthService(@Value("${mottainai.jwt.secret}") String secret,
                        @Value("${mottainai.jwt.algorithm}") String algorithm) {
-        if (secret.length() < 32 || !"HS256".equals(algorithm)) {
+        if (!"HS256".equals(algorithm)) {
             throw new IllegalStateException("Invalid JWT_SECRET or unsupported algorithm.");
         }
-        key = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
+        try {
+            byte[] decodedSecret = Base64.getDecoder().decode(secret.trim());
+            if (decodedSecret.length < 32) {
+                throw new IllegalStateException("Invalid JWT_SECRET or unsupported algorithm.");
+            }
+            key = Keys.hmacShaKeyFor(decodedSecret);
+        } catch (IllegalArgumentException exception) {
+            throw new IllegalStateException("JWT_SECRET must be Base64 encoded.", exception);
+        }
     }
 
     public Principal principal(String authorization) {
