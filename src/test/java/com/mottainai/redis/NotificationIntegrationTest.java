@@ -10,6 +10,7 @@ import io.jsonwebtoken.security.Keys;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.Date;
 import java.util.Map;
 import java.util.UUID;
@@ -27,7 +28,8 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 @EnabledIfEnvironmentVariable(named = "REDIS_TEST_HOST", matches = ".+")
 class NotificationIntegrationTest {
-    private static final String SECRET = "integration_test_secret_at_least_32_characters";
+    private static final byte[] RAW_SECRET = "integration_test_secret_at_least_32_characters".getBytes(StandardCharsets.UTF_8);
+    private static final String SECRET = Base64.getEncoder().encodeToString(RAW_SECRET);
     private static LettuceConnectionFactory factory;
     private static StringRedisTemplate redis;
     private long company;
@@ -324,6 +326,6 @@ class NotificationIntegrationTest {
     private static String token(long company, long user) {
         return "Bearer " + Jwts.builder().subject(Long.toString(user)).claim("empresa_id", company)
                 .claim("role", "ESTOQUISTA").expiration(Date.from(Instant.now().plusSeconds(300)))
-                .signWith(Keys.hmacShaKeyFor(SECRET.getBytes(StandardCharsets.UTF_8))).compact();
+                .signWith(Keys.hmacShaKeyFor(RAW_SECRET)).compact();
     }
 }

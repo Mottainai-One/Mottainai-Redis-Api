@@ -6,13 +6,15 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.time.Instant;
 import java.util.Date;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.server.ResponseStatusException;
 
 class AuthServiceTest {
-    private static final String SECRET = "local_test_secret_with_more_than_32_characters";
+    private static final byte[] RAW_SECRET = "local_test_secret_with_more_than_32_characters".getBytes(StandardCharsets.UTF_8);
+    private static final String SECRET = Base64.getEncoder().encodeToString(RAW_SECRET);
     private final AuthService auth = new AuthService(SECRET, "HS256");
 
     @Test
@@ -22,7 +24,7 @@ class AuthServiceTest {
                 .claim("empresa_id", 1)
                 .claim("role", "ESTOQUISTA")
                 .expiration(Date.from(Instant.now().plusSeconds(300)))
-                .signWith(Keys.hmacShaKeyFor(SECRET.getBytes(StandardCharsets.UTF_8)))
+                .signWith(Keys.hmacShaKeyFor(RAW_SECRET))
                 .compact();
 
         AuthService.Principal principal = auth.principal("Bearer " + token);
@@ -52,7 +54,7 @@ class AuthServiceTest {
                 .claim("usuario_id", 10).claim("empresa_id", 1)
                 .claim("role", "GERENTE").claim("use", use)
                 .expiration(Date.from(Instant.now().plusSeconds(300)))
-                .signWith(Keys.hmacShaKeyFor(SECRET.getBytes(StandardCharsets.UTF_8)))
+                .signWith(Keys.hmacShaKeyFor(RAW_SECRET))
                 .compact();
     }
 
@@ -62,7 +64,7 @@ class AuthServiceTest {
                 .subject("10")
                 .claim("empresa_id", 1)
                 .claim("role", "ESTOQUISTA")
-                .signWith(Keys.hmacShaKeyFor(SECRET.getBytes(StandardCharsets.UTF_8)))
+                .signWith(Keys.hmacShaKeyFor(RAW_SECRET))
                 .compact();
 
         ResponseStatusException error = assertThrows(
