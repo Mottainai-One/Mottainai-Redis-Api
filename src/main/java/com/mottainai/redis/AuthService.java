@@ -5,6 +5,7 @@ import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
 import java.nio.charset.StandardCharsets;
 import java.util.Set;
+import java.util.Locale;
 import javax.crypto.SecretKey;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -32,9 +33,17 @@ public class AuthService {
             if (claims.getExpiration() == null) {
                 throw unauthorized();
             }
-            long userId = Long.parseLong(claims.getSubject());
+            Object explicitUserId = claims.get("usuario_id");
+            String tokenUse = claims.get("use", String.class);
+            if ((explicitUserId != null && !"access".equals(tokenUse))
+                    || (tokenUse != null && !"access".equals(tokenUse))) {
+                throw unauthorized();
+            }
+            if (claims.getSubject() == null || claims.getSubject().isBlank()) throw unauthorized();
+            long userId = Long.parseLong(explicitUserId == null
+                    ? claims.getSubject() : explicitUserId.toString());
             long companyId = Long.parseLong(claims.get("empresa_id").toString());
-            String role = claims.get("role", String.class).toUpperCase();
+            String role = claims.get("role", String.class).toUpperCase(Locale.ROOT);
             if (userId < 1 || companyId < 1 || !ROLES.contains(role)) throw unauthorized();
             return new Principal(userId, companyId, role);
         } catch (RuntimeException exception) {

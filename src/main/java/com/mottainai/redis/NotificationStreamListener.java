@@ -33,6 +33,7 @@ public class NotificationStreamListener implements StreamListener<String, MapRec
 
     private final StringRedisTemplate redis;
     private final NotificationWriter writer;
+    private final NotificationStreamMaintenance maintenance;
     private final String streamKey;
     private final String group;
     private final String consumer;
@@ -40,15 +41,18 @@ public class NotificationStreamListener implements StreamListener<String, MapRec
     private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
     private final Duration reclaimIdle;
     private String pendingCursor;
+    private long lastTrimNanos;
 
     public NotificationStreamListener(StringRedisTemplate redis,
                                       NotificationWriter writer,
+                                      NotificationStreamMaintenance maintenance,
                                       @Value("${mottainai.stream.key}") String streamKey,
                                       @Value("${mottainai.stream.group}") String group,
                                       @Value("${mottainai.stream.consumer}") String consumer,
                                       @Value("${mottainai.stream.reclaim-idle-ms:60000}") long reclaimIdleMillis) {
         this.redis = redis;
         this.writer = writer;
+        this.maintenance = maintenance;
         this.streamKey = streamKey;
         this.group = group;
         this.consumer = consumer;
@@ -59,6 +63,7 @@ public class NotificationStreamListener implements StreamListener<String, MapRec
     @PostConstruct
     void start() {
         createGroupIfMissing();
+        maintenance.initialize();
         executor.scheduleWithFixedDelay(this::poll, 0, 1, TimeUnit.SECONDS);
         log.info("Listening on stream {} as {}/{}", streamKey, group, consumer);
     }
@@ -93,23 +98,32 @@ public class NotificationStreamListener implements StreamListener<String, MapRec
                     if (entry.getElapsedTimeSinceLastDelivery().compareTo(reclaimIdle) >= 0) {
                         var claimed = redis.<String, String>opsForStream().claim(streamKey, group, consumer,
                                 reclaimIdle, RecordId.of(entry.getIdAsString()));
-                        for (var message : claimed) process(message);
+                        for (var message : claimed) process(message, entry.getTotalDeliveryCount() + 1);
                     }
                 }
                 if (pending.size() < 100) pendingCursor = null;
             }
             var messages = redis.<String, String>opsForStream().read(Consumer.from(group, consumer),
                     StreamReadOptions.empty().count(100), StreamOffset.create(streamKey, ReadOffset.lastConsumed()));
-            if (messages != null) for (var message : messages) process(message);
+            if (messages != null) for (var message : messages) process(message, 1);
+            long now = System.nanoTime();
+            if (lastTrimNanos == 0 || now - lastTrimNanos >= TimeUnit.MINUTES.toNanos(1)) {
+                maintenance.trim();
+                lastTrimNanos = now;
+            }
         } catch (RuntimeException exception) {
             log.error("Notification stream poll failed; retrying on the next poll", exception);
         }
     }
 
-    private void process(MapRecord<String, String, String> message) {
+    private void process(MapRecord<String, String, String> message, long attempts) {
         try {
             onMessage(message);
         } catch (RuntimeException exception) {
+            if (attempts >= maintenance.maxDeliveries()) {
+                maintenance.deadLetter(message, "processing_failed:" + exception.getClass().getSimpleName(), attempts);
+                return;
+            }
             log.error("Notification stream message {} remains pending for retry", message.getId(), exception);
         }
     }
@@ -131,10 +145,8 @@ public class NotificationStreamListener implements StreamListener<String, MapRec
             priority = priority(fields.get("priority"));
             notificationId = notificationId(fields.get("id"), message.getId().getValue());
         } catch (IllegalArgumentException exception) {
-            // A malformed message never becomes valid, so acknowledge it instead of
-            // redelivering it forever. Bad data here would break the read path.
-            log.warn("Discarding malformed stream message {}: {}", message.getId(), exception.getMessage());
-            redis.opsForStream().acknowledge(streamKey, group, message.getId());
+            log.warn("Dead-lettering malformed stream message {}: {}", message.getId(), exception.getMessage());
+            maintenance.deadLetter(message, "invalid_payload:" + exception.getMessage(), 1);
             return;
         }
         writer.write(companyId, userId, notificationId, title, body, priority);

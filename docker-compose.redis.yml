@@ -1,0 +1,49 @@
+name: mottainai-redis-infra
+services:
+  durable:
+    image: redis:7.2.5
+    container_name: mottainai-redis
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env.redis}
+    command: ["sh", "-c", "exec redis-server /usr/local/etc/redis/redis.conf --requirepass \"$$REDIS_PASSWORD\""]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - durable-data:/data
+      - ./redis/durable.conf:/usr/local/etc/redis/redis.conf:ro
+    networks:
+      redis-network:
+        aliases: [redis]
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  cache:
+    image: redis:7.2.5
+    container_name: mottainai-redis-cache
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_CACHE_PASSWORD:?Set REDIS_CACHE_PASSWORD in .env.redis}
+    command: ["sh", "-c", "exec redis-server /usr/local/etc/redis/redis.conf --requirepass \"$$REDIS_PASSWORD\""]
+    ports:
+      - "127.0.0.1:6382:6379"
+    volumes:
+      - ./redis/cache.conf:/usr/local/etc/redis/redis.conf:ro
+    networks:
+      redis-network:
+        aliases: [redis-cache]
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+volumes:
+  durable-data:
+    external: true
+    name: mottainai-redis-data
+networks:
+  redis-network:
+    external: true
+    name: mottainai-redis-network

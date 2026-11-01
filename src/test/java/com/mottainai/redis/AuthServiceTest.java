@@ -33,6 +33,30 @@ class AuthServiceTest {
     }
 
     @Test
+    void acceptsOperationalAccessTokenWithFirebaseSubject() {
+        String token = operationalToken("access");
+        AuthService.Principal principal = auth.principal("Bearer " + token);
+        assertEquals(10, principal.userId());
+        assertEquals(1, principal.companyId());
+        assertEquals("GERENTE", principal.role());
+    }
+
+    @Test
+    void rejectsOperationalRefreshToken() {
+        assertThrows(ResponseStatusException.class,
+                () -> auth.principal("Bearer " + operationalToken("refresh")));
+    }
+
+    private String operationalToken(String use) {
+        return Jwts.builder().subject("firebase-user-uid")
+                .claim("usuario_id", 10).claim("empresa_id", 1)
+                .claim("role", "GERENTE").claim("use", use)
+                .expiration(Date.from(Instant.now().plusSeconds(300)))
+                .signWith(Keys.hmacShaKeyFor(SECRET.getBytes(StandardCharsets.UTF_8)))
+                .compact();
+    }
+
+    @Test
     void rejectsTokenWithoutExpiration() {
         String token = Jwts.builder()
                 .subject("10")

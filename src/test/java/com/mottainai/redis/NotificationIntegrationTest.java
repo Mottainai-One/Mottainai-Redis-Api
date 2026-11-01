@@ -34,6 +34,7 @@ class NotificationIntegrationTest {
     private NotificationWriter writer;
     private NotificationController controller;
     private NotificationStreamListener listener;
+    private NotificationStreamMaintenance maintenance;
     private String stream;
 
     @BeforeAll
@@ -53,13 +54,16 @@ class NotificationIntegrationTest {
         writer = spy(new NotificationWriter(redis));
         controller = new NotificationController(redis, new AuthService(SECRET, "HS256"));
         stream = "test:notification:" + UUID.randomUUID();
-        listener = new NotificationStreamListener(redis, writer, stream, "writers", "recovery", 1);
+        maintenance = new NotificationStreamMaintenance(redis, new com.fasterxml.jackson.databind.ObjectMapper(),
+                stream, "writers", stream + ":dlq", 3, 604800, 2592000);
+        listener = new NotificationStreamListener(redis, writer, maintenance, stream, "writers", "recovery", 1);
     }
 
     @AfterEach
     void cleanup() {
         listener.stop();
         redis.delete(stream);
+        redis.delete(stream + ":dlq");
         var keys = redis.keys(NotificationKeys.PREFIX + "*:" + company + ":*");
         if (keys != null && !keys.isEmpty()) redis.delete(keys);
     }
@@ -204,7 +208,7 @@ class NotificationIntegrationTest {
     @Test
     void pendingScanAdvancesPastAFullPageOfRecentDeliveries() {
         listener.stop();
-        listener = new NotificationStreamListener(redis, writer, stream, "writers", "recovery", 60000);
+        listener = new NotificationStreamListener(redis, writer, maintenance, stream, "writers", "recovery", 60000);
         listener.createGroupIfMissing();
         for (int i = 0; i < 101; i++) redis.opsForStream().add(notificationRecord());
         var messages = redis.<String, String>opsForStream().read(Consumer.from("writers", "old-consumer"),
@@ -227,6 +231,89 @@ class NotificationIntegrationTest {
         listener.poll();
         assertEquals(0L, redis.opsForStream().pending(stream, "writers").getTotalPendingMessages());
         assertTrue(controller.list(token(company, 10), 20).notifications().isEmpty());
+        var rejected = redis.<String, String>opsForStream().range(stream + ":dlq", org.springframework.data.domain.Range.unbounded());
+        assertEquals(1, rejected.size());
+        assertTrue(rejected.get(0).getValue().get("reason").startsWith("invalid_payload:"));
+        assertTrue(rejected.get(0).getValue().get("payload").contains("invalid"));
+    }
+
+    @Test
+    void createsAnEmptyDeadLetterStreamWithoutSyntheticRecords() {
+        maintenance.initialize();
+        maintenance.initialize();
+        assertEquals(0L, redis.opsForStream().size(stream + ":dlq"));
+        redis.delete(stream + ":dlq");
+        redis.opsForValue().set(stream + ":dlq", "wrong type");
+        assertThrows(RuntimeException.class, maintenance::initialize);
+    }
+
+    @Test
+    void exhaustedDeliveriesMoveToDeadLetterExactlyOnce() throws Exception {
+        listener.createGroupIfMissing();
+        var id = redis.opsForStream().add(notificationRecord());
+        doThrow(new IllegalStateException("permanent failure")).when(writer)
+                .write(anyLong(), anyLong(), anyString(), anyString(), anyString(), anyInt());
+        for (int i = 0; i < 3; i++) { listener.poll(); Thread.sleep(20); }
+        assertEquals(0L, redis.opsForStream().pending(stream, "writers").getTotalPendingMessages());
+        var rejected = redis.<String, String>opsForStream().range(stream + ":dlq", org.springframework.data.domain.Range.unbounded());
+        assertEquals(1, rejected.size());
+        assertEquals(id.getValue(), rejected.get(0).getValue().get("source_id"));
+        assertEquals("3", rejected.get(0).getValue().get("attempts"));
+        maintenance.deadLetter(MapRecord.create(stream, notificationRecord().getValue()).withId(id), "repeat", 3);
+        assertEquals(1L, redis.opsForStream().size(stream + ":dlq"));
+    }
+
+    @Test
+    void failedDeadLetterWritePreservesOriginalPendingMessage() {
+        listener.createGroupIfMissing();
+        var id = redis.opsForStream().add(MapRecord.create(stream, Map.of("company_id", "invalid")));
+        var message = redis.<String, String>opsForStream().read(Consumer.from("writers", "test"),
+                StreamOffset.create(stream, ReadOffset.lastConsumed())).get(0);
+        redis.opsForValue().set(stream + ":dlq", "wrong type");
+        assertThrows(RuntimeException.class, () -> listener.onMessage(message));
+        assertEquals(1L, redis.opsForStream().pending(stream, "writers").getTotalPendingMessages());
+        redis.delete(stream + ":dlq");
+        listener.onMessage(message);
+        assertEquals(0L, redis.opsForStream().pending(stream, "writers").getTotalPendingMessages());
+        assertEquals(id.getValue(), redis.<String, String>opsForStream().range(stream + ":dlq",
+                org.springframework.data.domain.Range.unbounded()).get(0).getValue().get("source_id"));
+    }
+
+    @Test
+    void retentionProtectsPendingAndUndeliveredEntriesInEveryGroup() {
+        listener.createGroupIfMissing();
+        var fields = notificationRecord().getValue();
+        for (String id : java.util.List.of("1-0", "2-0", "3-0", "4-0"))
+            redis.opsForStream().add(MapRecord.create(stream, fields).withId(org.springframework.data.redis.connection.stream.RecordId.of(id)));
+        redis.<String, String>opsForStream().read(Consumer.from("writers", "reader"), StreamReadOptions.empty().count(3),
+                StreamOffset.create(stream, ReadOffset.lastConsumed()));
+        redis.opsForStream().acknowledge(stream, "writers", "1-0", "3-0");
+        redis.opsForStream().createGroup(stream, ReadOffset.from("1-0"), "other-group");
+        maintenance.trim();
+        assertEquals(4L, redis.opsForStream().size(stream));
+        redis.opsForStream().destroyGroup(stream, "other-group");
+        maintenance.trim();
+        assertEquals(java.util.List.of("2-0", "3-0", "4-0"), redis.<String, String>opsForStream().range(stream,
+                org.springframework.data.domain.Range.unbounded()).stream().map(r -> r.getId().getValue()).toList());
+        redis.opsForStream().acknowledge(stream, "writers", "2-0");
+        maintenance.trim();
+        assertEquals(java.util.List.of("3-0", "4-0"), redis.<String, String>opsForStream().range(stream,
+                org.springframework.data.domain.Range.unbounded()).stream().map(r -> r.getId().getValue()).toList());
+    }
+
+    @Test
+    void retentionRemovesOnlyExpiredAcknowledgedHistory() {
+        listener.createGroupIfMissing();
+        redis.opsForStream().add(MapRecord.create(stream, notificationRecord().getValue())
+                .withId(org.springframework.data.redis.connection.stream.RecordId.of("1-0")));
+        redis.opsForStream().add(notificationRecord());
+        var messages = redis.<String, String>opsForStream().read(Consumer.from("writers", "reader"),
+                StreamOffset.create(stream, ReadOffset.lastConsumed()));
+        for (var message : messages) redis.opsForStream().acknowledge(stream, "writers", message.getId());
+        maintenance.trim();
+        assertEquals(1L, redis.opsForStream().size(stream));
+        assertNotEquals("1-0", redis.<String, String>opsForStream().range(stream,
+                org.springframework.data.domain.Range.unbounded()).get(0).getId().getValue());
     }
 
     private MapRecord<String, String, String> notificationRecord() {
