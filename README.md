@@ -12,11 +12,11 @@ A arquitetura foi desenhada para evitar qualquer tipo de manipulação ou forja 
 * **Claims Obrigatórios:** O token deve conter obrigatoriamente `exp`, `sub`, `empresa_id` e `role`.
 * **Controle de Perfis:** A API aceita requisições apenas dos perfis `CLIENTE`, `ESTOQUISTA`, `GERENTE` e `DONO`.
 * **Isolamento Multi-tenant:** Os dados de identificação (empresa e usuário) são extraídos exclusivamente do token JWT. O cliente não pode forjar acessos passando parâmetros no corpo da requisição.
-* **Topologia de Rede:** O banco Redis vive protegido dentro da rede interna do Docker (`mottainai-redis-network`). A API é a única ponte e expõe comunicação apenas localmente (`127.0.0.1:8080`).
+* **Topologia de Rede:** O banco Redis vive protegido dentro da rede interna do Docker (`mottainai-redis-network`). A API de leitura continua exposta apenas localmente; o endpoint de publicação aceita somente chamadas servidor-servidor com segredo próprio.
 
 ## 🗂️ Escopo e Endpoints
 
-**Nota Arquitetural:** Esta API não cria notificações recebendo chamadas HTTP externas. A criação de alertas é de responsabilidade exclusiva do Backend principal do Mottainai ou via scripts internos de teste. Isso garante que o app mobile não consiga inventar falsos avisos operacionais.
+**Nota Arquitetural:** O app mobile não pode criar notificações. Produtores confiáveis usam o Redis Stream dentro da rede Docker ou o endpoint servidor-servidor protegido por segredo.
 
 Os endpoints expostos são focados estritamente na leitura e controle de estado:
 
@@ -26,6 +26,11 @@ Os endpoints expostos são focados estritamente na leitura e controle de estado:
 | `GET /readyz` | Healthcheck de infraestrutura. Confirma que o banco Redis está acessível e respondendo. |
 | `GET /v1/notifications?limit=20` | Lista as notificações pertencentes ao usuário autenticado e retorna o total de mensagens não lidas. |
 | `POST /v1/notifications/{id}/read` | Marca uma notificação como lida. É uma operação idempotente (pode ser chamada múltiplas vezes sem duplicar ou corromper o estado). |
+| `POST /internal/v1/notifications` | Publica uma notificação no Stream para consumo interno. Exige `X-Mottainai-Notification-Secret`; não usar pelo app mobile. |
+
+O endpoint interno aceita `companyId`, `userId`, `id`, `title`, `body` e `priority`. Ele valida os limites do mesmo contrato do Stream e retorna `202`/`queued`. Configure `NOTIFICATION_PUBLISHER_SECRET` com pelo menos 32 caracteres aleatórios. Para uso por serviços fora da rede Docker, publique **somente esse endpoint** por um proxy HTTPS com controle de acesso; a porta padrão do Docker permanece vinculada a `127.0.0.1`. Não exponha a porta do Redis.
+
+Para os pedidos de aprovação do PDV, a Cloud Function publica uma notificação por gerente elegível nesta rota e também envia o push pelo FCM. O `id` é estável por pedido e gerente, então uma repetição da chamada não duplica a notificação Redis.
 
 ## 🤖 Ingestão via Redis Stream (serviço de IA)
 

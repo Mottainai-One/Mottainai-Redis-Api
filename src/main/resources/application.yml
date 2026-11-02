@@ -7,6 +7,8 @@ spring:
       url: ${REDIS_URL}
       timeout: 2s
 mottainai:
+  notification:
+    publisher-secret: ${NOTIFICATION_PUBLISHER_SECRET:}
   jwt:
     secret: ${JWT_SECRET}
     algorithm: ${JWT_ALGORITHM:HS256}
