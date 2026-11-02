@@ -1,0 +1,6 @@
+EVAL "local t=redis.call('TIME'); local ms=t[1]*1000+math.floor(t[2]/1000); redis.call('ZADD',KEYS[1],ms,tostring(ms)..':seed-demo'); redis.call('EXPIRE',KEYS[1],60); return redis.call('ZCARD',KEYS[1])" 1 mottainai:v1:rate-limit:2147483647:2147483647
+EVAL "local t=redis.call('TIME'); local ms=t[1]*1000+math.floor(t[2]/1000); redis.call('ZADD',KEYS[1],ms,tostring(ms)..':seed-demo'); redis.call('EXPIRE',KEYS[1],60); return redis.call('ZCARD',KEYS[1])" 1 mottainai:v1:rate-limit:shelf:2147483647:2147483647
+SET mottainai:v1:auth:revoked:seed-demo-jti 1 EX 60
+SET mottainai:v1:alert-webhook-sent:2147483647:seed-demo-alert 1 EX 604800
+SET mottainai:v1:idempotency:2147483647:seed-demo-operation "{\"demo\":true}" EX 86400
+XADD mottainai:v1:notification:stream * company_id 2147483647 user_id 2147483647 priority 1 id seed-demo-notification title "Seed de teste" body "Notificacao de demonstracao."

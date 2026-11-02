@@ -7,6 +7,8 @@ spring:
       url: ${REDIS_URL}
       timeout: 2s
 mottainai:
+  notification:
+    publisher-secret: ${NOTIFICATION_PUBLISHER_SECRET:}
   jwt:
     secret: ${JWT_SECRET}
     algorithm: ${JWT_ALGORITHM:HS256}
@@ -15,3 +17,7 @@ mottainai:
     group: ${NOTIFICATION_STREAM_GROUP:notification-writers}
     consumer: ${HOSTNAME:mobile-api}
     reclaim-idle-ms: ${NOTIFICATION_STREAM_RECLAIM_IDLE_MS:60000}
+    dead-letter-key: ${NOTIFICATION_DEAD_LETTER_KEY:mottainai:v1:notification:dead-letter}
+    max-deliveries: ${NOTIFICATION_STREAM_MAX_DELIVERIES:5}
+    retention-seconds: ${NOTIFICATION_STREAM_RETENTION_SECONDS:604800}
+    dead-letter-retention-seconds: ${NOTIFICATION_DEAD_LETTER_RETENTION_SECONDS:2592000}

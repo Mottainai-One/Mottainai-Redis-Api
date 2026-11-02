@@ -72,7 +72,8 @@ public class NotificationController {
             Map<Object, Object> data = new java.util.HashMap<>(fields.size() / 2, 1.0f);
             for (int j = 0; j < fields.size(); j += 2) data.put(fields.get(j), fields.get(j + 1));
             notifications.add(new NotificationResponse(value(data, "id"), value(data, "title"), value(data, "body"),
-                    Integer.parseInt(value(data, "priority")), value(data, "status"), Long.parseLong(value(data, "created_at"))));
+                    Integer.parseInt(value(data, "priority")), value(data, "status"), Long.parseLong(value(data, "created_at")),
+                    optionalLong(data,"promotion_id"), optionalLong(data,"store_id"), optionalLong(data,"product_id"), optionalLong(data,"expires_at")));
         }
         return new InboxResponse(Integer.parseInt(result.get(0).toString()), notifications);
     }
@@ -93,7 +94,12 @@ public class NotificationController {
     private static String unreadKey(AuthService.Principal p) { return NotificationKeys.unread(p.companyId(), p.userId()); }
     private static String notificationKey(AuthService.Principal p, String id) { return NotificationKeys.data(p.companyId(), p.userId(), id); }
     private static String value(Map<Object, Object> data, String key) { return data.get(key).toString(); }
+    /** Lê destinos opcionais sem alterar o contrato dos avisos genéricos. */
+    private static Long optionalLong(Map<Object,Object> data,String key) {
+        Object value=data.get(key); return value==null?null:Long.valueOf(value.toString());
+    }
 
     public record InboxResponse(int unreadCount, List<NotificationResponse> notifications) {}
-    public record NotificationResponse(String id, String title, String body, int priority, String status, long createdAt) {}
+    public record NotificationResponse(String id, String title, String body, int priority, String status, long createdAt,
+                                       Long promotionId, Long storeId, Long productId, Long expiresAt) {}
 }

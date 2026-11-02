@@ -11,8 +11,12 @@ final class NotificationScripts {
             local unread = 0
             local ttl = 0
             local persistent = false
+            local time = redis.call('TIME')
+            local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
             for _, id in ipairs(redis.call('ZREVRANGE', inbox, 0, -1)) do
                 local key = prefix .. id
+                local expires = tonumber(redis.call('HGET', key, 'expires_at'))
+                if expires and expires <= now then redis.call('DEL', key) end
                 if redis.call('EXISTS', key) == 0 then
                     redis.call('ZREM', inbox, id)
                 else

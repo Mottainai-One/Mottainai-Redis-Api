@@ -4,7 +4,9 @@ import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.Set;
+import java.util.Locale;
 import javax.crypto.SecretKey;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -18,10 +20,18 @@ public class AuthService {
 
     public AuthService(@Value("${mottainai.jwt.secret}") String secret,
                        @Value("${mottainai.jwt.algorithm}") String algorithm) {
-        if (secret.length() < 32 || !"HS256".equals(algorithm)) {
+        if (!"HS256".equals(algorithm)) {
             throw new IllegalStateException("Invalid JWT_SECRET or unsupported algorithm.");
         }
-        key = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
+        try {
+            byte[] decodedSecret = Base64.getDecoder().decode(secret.trim());
+            if (decodedSecret.length < 32) {
+                throw new IllegalStateException("Invalid JWT_SECRET or unsupported algorithm.");
+            }
+            key = Keys.hmacShaKeyFor(decodedSecret);
+        } catch (IllegalArgumentException exception) {
+            throw new IllegalStateException("JWT_SECRET must be Base64 encoded.", exception);
+        }
     }
 
     public Principal principal(String authorization) {
@@ -32,9 +42,17 @@ public class AuthService {
             if (claims.getExpiration() == null) {
                 throw unauthorized();
             }
-            long userId = Long.parseLong(claims.getSubject());
+            Object explicitUserId = claims.get("usuario_id");
+            String tokenUse = claims.get("use", String.class);
+            if ((explicitUserId != null && !"access".equals(tokenUse))
+                    || (tokenUse != null && !"access".equals(tokenUse))) {
+                throw unauthorized();
+            }
+            if (claims.getSubject() == null || claims.getSubject().isBlank()) throw unauthorized();
+            long userId = Long.parseLong(explicitUserId == null
+                    ? claims.getSubject() : explicitUserId.toString());
             long companyId = Long.parseLong(claims.get("empresa_id").toString());
-            String role = claims.get("role", String.class).toUpperCase();
+            String role = claims.get("role", String.class).toUpperCase(Locale.ROOT);
             if (userId < 1 || companyId < 1 || !ROLES.contains(role)) throw unauthorized();
             return new Principal(userId, companyId, role);
         } catch (RuntimeException exception) {

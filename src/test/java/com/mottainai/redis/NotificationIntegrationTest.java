@@ -10,6 +10,7 @@ import io.jsonwebtoken.security.Keys;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.Date;
 import java.util.Map;
 import java.util.UUID;
@@ -27,13 +28,15 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 @EnabledIfEnvironmentVariable(named = "REDIS_TEST_HOST", matches = ".+")
 class NotificationIntegrationTest {
-    private static final String SECRET = "integration_test_secret_at_least_32_characters";
+    private static final byte[] RAW_SECRET = "integration_test_secret_at_least_32_characters".getBytes(StandardCharsets.UTF_8);
+    private static final String SECRET = Base64.getEncoder().encodeToString(RAW_SECRET);
     private static LettuceConnectionFactory factory;
     private static StringRedisTemplate redis;
     private long company;
     private NotificationWriter writer;
     private NotificationController controller;
     private NotificationStreamListener listener;
+    private NotificationStreamMaintenance maintenance;
     private String stream;
 
     @BeforeAll
@@ -53,13 +56,16 @@ class NotificationIntegrationTest {
         writer = spy(new NotificationWriter(redis));
         controller = new NotificationController(redis, new AuthService(SECRET, "HS256"));
         stream = "test:notification:" + UUID.randomUUID();
-        listener = new NotificationStreamListener(redis, writer, stream, "writers", "recovery", 1);
+        maintenance = new NotificationStreamMaintenance(redis, new com.fasterxml.jackson.databind.ObjectMapper(),
+                stream, "writers", stream + ":dlq", 3, 604800, 2592000);
+        listener = new NotificationStreamListener(redis, writer, maintenance, stream, "writers", "recovery", 1);
     }
 
     @AfterEach
     void cleanup() {
         listener.stop();
         redis.delete(stream);
+        redis.delete(stream + ":dlq");
         var keys = redis.keys(NotificationKeys.PREFIX + "*:" + company + ":*");
         if (keys != null && !keys.isEmpty()) redis.delete(keys);
     }
@@ -204,7 +210,7 @@ class NotificationIntegrationTest {
     @Test
     void pendingScanAdvancesPastAFullPageOfRecentDeliveries() {
         listener.stop();
-        listener = new NotificationStreamListener(redis, writer, stream, "writers", "recovery", 60000);
+        listener = new NotificationStreamListener(redis, writer, maintenance, stream, "writers", "recovery", 60000);
         listener.createGroupIfMissing();
         for (int i = 0; i < 101; i++) redis.opsForStream().add(notificationRecord());
         var messages = redis.<String, String>opsForStream().read(Consumer.from("writers", "old-consumer"),
@@ -227,6 +233,138 @@ class NotificationIntegrationTest {
         listener.poll();
         assertEquals(0L, redis.opsForStream().pending(stream, "writers").getTotalPendingMessages());
         assertTrue(controller.list(token(company, 10), 20).notifications().isEmpty());
+        var rejected = redis.<String, String>opsForStream().range(stream + ":dlq", org.springframework.data.domain.Range.unbounded());
+        assertEquals(1, rejected.size());
+        assertTrue(rejected.get(0).getValue().get("reason").startsWith("invalid_payload:"));
+        assertTrue(rejected.get(0).getValue().get("payload").contains("invalid"));
+    }
+
+    @Test
+    void createsAnEmptyDeadLetterStreamWithoutSyntheticRecords() {
+        maintenance.initialize();
+        maintenance.initialize();
+        assertEquals(0L, redis.opsForStream().size(stream + ":dlq"));
+        redis.delete(stream + ":dlq");
+        redis.opsForValue().set(stream + ":dlq", "wrong type");
+        assertThrows(RuntimeException.class, maintenance::initialize);
+    }
+
+    @Test
+    void exhaustedDeliveriesMoveToDeadLetterExactlyOnce() throws Exception {
+        listener.createGroupIfMissing();
+        var id = redis.opsForStream().add(notificationRecord());
+        doThrow(new IllegalStateException("permanent failure")).when(writer)
+                .write(anyLong(), anyLong(), anyString(), anyString(), anyString(), anyInt());
+        for (int i = 0; i < 3; i++) { listener.poll(); Thread.sleep(20); }
+        assertEquals(0L, redis.opsForStream().pending(stream, "writers").getTotalPendingMessages());
+        var rejected = redis.<String, String>opsForStream().range(stream + ":dlq", org.springframework.data.domain.Range.unbounded());
+        assertEquals(1, rejected.size());
+        assertEquals(id.getValue(), rejected.get(0).getValue().get("source_id"));
+        assertEquals("3", rejected.get(0).getValue().get("attempts"));
+        maintenance.deadLetter(MapRecord.create(stream, notificationRecord().getValue()).withId(id), "repeat", 3);
+        assertEquals(1L, redis.opsForStream().size(stream + ":dlq"));
+    }
+
+    @Test
+    void failedDeadLetterWritePreservesOriginalPendingMessage() {
+        listener.createGroupIfMissing();
+        var id = redis.opsForStream().add(MapRecord.create(stream, Map.of("company_id", "invalid")));
+        var message = redis.<String, String>opsForStream().read(Consumer.from("writers", "test"),
+                StreamOffset.create(stream, ReadOffset.lastConsumed())).get(0);
+        redis.opsForValue().set(stream + ":dlq", "wrong type");
+        assertThrows(RuntimeException.class, () -> listener.onMessage(message));
+        assertEquals(1L, redis.opsForStream().pending(stream, "writers").getTotalPendingMessages());
+        redis.delete(stream + ":dlq");
+        listener.onMessage(message);
+        assertEquals(0L, redis.opsForStream().pending(stream, "writers").getTotalPendingMessages());
+        assertEquals(id.getValue(), redis.<String, String>opsForStream().range(stream + ":dlq",
+                org.springframework.data.domain.Range.unbounded()).get(0).getValue().get("source_id"));
+    }
+
+    @Test
+    void retentionProtectsPendingAndUndeliveredEntriesInEveryGroup() {
+        listener.createGroupIfMissing();
+        var fields = notificationRecord().getValue();
+        for (String id : java.util.List.of("1-0", "2-0", "3-0", "4-0"))
+            redis.opsForStream().add(MapRecord.create(stream, fields).withId(org.springframework.data.redis.connection.stream.RecordId.of(id)));
+        redis.<String, String>opsForStream().read(Consumer.from("writers", "reader"), StreamReadOptions.empty().count(3),
+                StreamOffset.create(stream, ReadOffset.lastConsumed()));
+        redis.opsForStream().acknowledge(stream, "writers", "1-0", "3-0");
+        redis.opsForStream().createGroup(stream, ReadOffset.from("1-0"), "other-group");
+        maintenance.trim();
+        assertEquals(4L, redis.opsForStream().size(stream));
+        redis.opsForStream().destroyGroup(stream, "other-group");
+        maintenance.trim();
+        assertEquals(java.util.List.of("2-0", "3-0", "4-0"), redis.<String, String>opsForStream().range(stream,
+                org.springframework.data.domain.Range.unbounded()).stream().map(r -> r.getId().getValue()).toList());
+        redis.opsForStream().acknowledge(stream, "writers", "2-0");
+        maintenance.trim();
+        assertEquals(java.util.List.of("3-0", "4-0"), redis.<String, String>opsForStream().range(stream,
+                org.springframework.data.domain.Range.unbounded()).stream().map(r -> r.getId().getValue()).toList());
+    }
+
+    @Test
+    void retentionRemovesOnlyExpiredAcknowledgedHistory() {
+        listener.createGroupIfMissing();
+        redis.opsForStream().add(MapRecord.create(stream, notificationRecord().getValue())
+                .withId(org.springframework.data.redis.connection.stream.RecordId.of("1-0")));
+        redis.opsForStream().add(notificationRecord());
+        var messages = redis.<String, String>opsForStream().read(Consumer.from("writers", "reader"),
+                StreamOffset.create(stream, ReadOffset.lastConsumed()));
+        for (var message : messages) redis.opsForStream().acknowledge(stream, "writers", message.getId());
+        maintenance.trim();
+        assertEquals(1L, redis.opsForStream().size(stream));
+        assertNotEquals("1-0", redis.<String, String>opsForStream().range(stream,
+                org.springframework.data.domain.Range.unbounded()).get(0).getId().getValue());
+    }
+
+    /** Mantém destino, data legada em segundos e leitura em reentregas do mesmo produto. */
+    @Test void promotionMetadataSurvivesStreamAndReplay() throws Exception {
+        long expires=System.currentTimeMillis()+60000;
+        String publisher="test-only-private-publisher-secret-32";
+        var ingress=new InternalNotificationController(redis,stream,publisher);
+        var mvc=MockMvcBuilders.standaloneSetup(ingress).build();
+        listener.createGroupIfMissing();
+        String body=new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(Map.of(
+            "companyId",company,"userId",10,"id","promotion-one","title","Produto","body","Na loja","priority",3,
+            "promotionId",1,"storeId",2,"productId",3,"expiresAt",expires));
+        mvc.perform(post("/internal/v1/notifications").contentType("application/json").content(body))
+            .andExpect(status().isUnauthorized());
+        mvc.perform(post("/internal/v1/notifications").header("X-Mottainai-Notification-Secret",publisher)
+            .contentType("application/json").content(body)).andExpect(status().isAccepted());
+        listener.poll();
+        var item=controller.list(token(company,10),20).notifications().get(0);
+        assertEquals(1L,item.promotionId());assertEquals(2L,item.storeId());assertEquals(3L,item.productId());
+        assertEquals(expires,item.expiresAt());assertTrue(item.createdAt()<100_000_000_000L);
+        controller.markRead(token(company,10),"promotion-one");
+        writer.write(company,10,"promotion-one","Alterado","Alterado",1,new PromotionNotificationTarget(1,2,3,expires+1000));
+        var replay=controller.list(token(company,10),20).notifications().get(0);
+        assertEquals("read",replay.status());assertEquals("Produto",replay.title());assertEquals(expires,replay.expiresAt());
+        assertTrue(redis.getExpire(NotificationKeys.data(company,10,"promotion-one"))<=60);
+    }
+
+    /** Remove ofertas vencidas mesmo quando ainda há referência na caixa e contador de não lidos. */
+    @Test void expiredPromotionDoesNotRemainVisible(){
+        writer.write(company,10,"expired-promotion","Produto","Oferta",2,
+            new PromotionNotificationTarget(1,2,3,System.currentTimeMillis()-1));
+        assertEquals(0,controller.list(token(company,10),20).unreadCount());
+        writer.write(company,10,"promotion","Produto","Oferta",2,new PromotionNotificationTarget(1,2,3,System.currentTimeMillis()+60000));
+        redis.opsForHash().put(NotificationKeys.data(company,10,"promotion"),"expires_at",Long.toString(System.currentTimeMillis()-1));
+        assertTrue(controller.list(token(company,10),20).notifications().isEmpty());
+        assertEquals(0,controller.list(token(company,10),20).unreadCount());
+    }
+
+    /** Recusa metadados incompletos sem quebrar a construção de avisos operacionais genéricos. */
+    @Test void rejectsPartialAndExpiredTargetsBeforeQueueing() throws Exception {
+        String publisher="test-only-private-publisher-secret-32";
+        var mvc=MockMvcBuilders.standaloneSetup(new InternalNotificationController(redis,stream,publisher)).build();
+        String body="{\"companyId\":1,\"userId\":10,\"id\":\"one\",\"title\":\"Produto\",\"body\":\"Oferta\",\"priority\":2,\"promotionId\":1}";
+        mvc.perform(post("/internal/v1/notifications").header("X-Mottainai-Notification-Secret",publisher)
+            .contentType("application/json").content(body)).andExpect(status().isBadRequest());
+        assertFalse(redis.hasKey(stream));
+        assertNull(PromotionNotificationTarget.optional(null,null,null,null));
+        assertThrows(IllegalArgumentException.class,()->PromotionNotificationTarget.optional(1L,null,2L,1000L));
+        assertThrows(IllegalArgumentException.class,()->new PromotionNotificationTarget(1,2,3,1));
     }
 
     private MapRecord<String, String, String> notificationRecord() {
@@ -237,6 +375,6 @@ class NotificationIntegrationTest {
     private static String token(long company, long user) {
         return "Bearer " + Jwts.builder().subject(Long.toString(user)).claim("empresa_id", company)
                 .claim("role", "ESTOQUISTA").expiration(Date.from(Instant.now().plusSeconds(300)))
-                .signWith(Keys.hmacShaKeyFor(SECRET.getBytes(StandardCharsets.UTF_8))).compact();
+                .signWith(Keys.hmacShaKeyFor(RAW_SECRET)).compact();
     }
 }
