@@ -137,6 +137,7 @@ public class NotificationStreamListener implements StreamListener<String, MapRec
         String body;
         int priority;
         String notificationId;
+        PromotionNotificationTarget target;
         try {
             companyId = positive(fields.get("company_id"), "company_id");
             userId = positive(fields.get("user_id"), "user_id");
@@ -144,12 +145,14 @@ public class NotificationStreamListener implements StreamListener<String, MapRec
             body = required(fields.get("body"), "body", 1000);
             priority = priority(fields.get("priority"));
             notificationId = notificationId(fields.get("id"), message.getId().getValue());
+            target = PromotionNotificationTarget.from(fields);
         } catch (IllegalArgumentException exception) {
             log.warn("Dead-lettering malformed stream message {}: {}", message.getId(), exception.getMessage());
             maintenance.deadLetter(message, "invalid_payload:" + exception.getMessage(), 1);
             return;
         }
-        writer.write(companyId, userId, notificationId, title, body, priority);
+        if (target == null) writer.write(companyId, userId, notificationId, title, body, priority);
+        else writer.write(companyId, userId, notificationId, title, body, priority, target);
         log.info("Notification {} written for company {} user {}", notificationId, companyId, userId);
         redis.opsForStream().acknowledge(streamKey, group, message.getId());
     }

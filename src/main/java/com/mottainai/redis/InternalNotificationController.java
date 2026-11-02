@@ -50,15 +50,36 @@ public class InternalNotificationController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid notification payload.");
         }
 
-        redis.opsForStream().add(streamKey, Map.of(
+        PromotionNotificationTarget target;
+        try {
+            target = PromotionNotificationTarget.optional(request.promotionId(), request.storeId(),
+                    request.productId(), request.expiresAt());
+            if (target != null && target.expiresAt() <= System.currentTimeMillis()) {
+                throw new IllegalArgumentException("Expired promotion target");
+            }
+        } catch (IllegalArgumentException invalid) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid promotion target.");
+        }
+        Map<String, String> fields = new java.util.LinkedHashMap<>(Map.of(
                 "company_id", Long.toString(request.companyId()),
                 "user_id", Long.toString(request.userId()),
                 "id", request.id(),
                 "title", request.title(),
                 "body", request.body(),
                 "priority", Integer.toString(request.priority())));
+        if (target != null) target.appendTo(fields);
+        if (redis.opsForStream().add(streamKey, fields) == null) {
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Notification queue unavailable.");
+        }
         return ResponseEntity.accepted().body(Map.of("id", request.id(), "status", "queued"));
     }
 
-    public record PublishRequest(long companyId, long userId, String id, String title, String body, int priority) {}
+    /** Evento privado com destino opcional; avisos operacionais existentes continuam sem destino de promoção. */
+    public record PublishRequest(long companyId, long userId, String id, String title, String body, int priority,
+                                 Long promotionId, Long storeId, Long productId, Long expiresAt) {
+        /** Preserva a construção dos avisos genéricos existentes. */
+        public PublishRequest(long companyId, long userId, String id, String title, String body, int priority) {
+            this(companyId,userId,id,title,body,priority,null,null,null,null);
+        }
+    }
 }

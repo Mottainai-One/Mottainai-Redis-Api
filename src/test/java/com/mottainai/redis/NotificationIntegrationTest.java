@@ -318,6 +318,55 @@ class NotificationIntegrationTest {
                 org.springframework.data.domain.Range.unbounded()).get(0).getId().getValue());
     }
 
+    /** Mantém destino, data legada em segundos e leitura em reentregas do mesmo produto. */
+    @Test void promotionMetadataSurvivesStreamAndReplay() throws Exception {
+        long expires=System.currentTimeMillis()+60000;
+        String publisher="test-only-private-publisher-secret-32";
+        var ingress=new InternalNotificationController(redis,stream,publisher);
+        var mvc=MockMvcBuilders.standaloneSetup(ingress).build();
+        listener.createGroupIfMissing();
+        String body=new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(Map.of(
+            "companyId",company,"userId",10,"id","promotion-one","title","Produto","body","Na loja","priority",3,
+            "promotionId",1,"storeId",2,"productId",3,"expiresAt",expires));
+        mvc.perform(post("/internal/v1/notifications").contentType("application/json").content(body))
+            .andExpect(status().isUnauthorized());
+        mvc.perform(post("/internal/v1/notifications").header("X-Mottainai-Notification-Secret",publisher)
+            .contentType("application/json").content(body)).andExpect(status().isAccepted());
+        listener.poll();
+        var item=controller.list(token(company,10),20).notifications().get(0);
+        assertEquals(1L,item.promotionId());assertEquals(2L,item.storeId());assertEquals(3L,item.productId());
+        assertEquals(expires,item.expiresAt());assertTrue(item.createdAt()<100_000_000_000L);
+        controller.markRead(token(company,10),"promotion-one");
+        writer.write(company,10,"promotion-one","Alterado","Alterado",1,new PromotionNotificationTarget(1,2,3,expires+1000));
+        var replay=controller.list(token(company,10),20).notifications().get(0);
+        assertEquals("read",replay.status());assertEquals("Produto",replay.title());assertEquals(expires,replay.expiresAt());
+        assertTrue(redis.getExpire(NotificationKeys.data(company,10,"promotion-one"))<=60);
+    }
+
+    /** Remove ofertas vencidas mesmo quando ainda há referência na caixa e contador de não lidos. */
+    @Test void expiredPromotionDoesNotRemainVisible(){
+        writer.write(company,10,"expired-promotion","Produto","Oferta",2,
+            new PromotionNotificationTarget(1,2,3,System.currentTimeMillis()-1));
+        assertEquals(0,controller.list(token(company,10),20).unreadCount());
+        writer.write(company,10,"promotion","Produto","Oferta",2,new PromotionNotificationTarget(1,2,3,System.currentTimeMillis()+60000));
+        redis.opsForHash().put(NotificationKeys.data(company,10,"promotion"),"expires_at",Long.toString(System.currentTimeMillis()-1));
+        assertTrue(controller.list(token(company,10),20).notifications().isEmpty());
+        assertEquals(0,controller.list(token(company,10),20).unreadCount());
+    }
+
+    /** Recusa metadados incompletos sem quebrar a construção de avisos operacionais genéricos. */
+    @Test void rejectsPartialAndExpiredTargetsBeforeQueueing() throws Exception {
+        String publisher="test-only-private-publisher-secret-32";
+        var mvc=MockMvcBuilders.standaloneSetup(new InternalNotificationController(redis,stream,publisher)).build();
+        String body="{\"companyId\":1,\"userId\":10,\"id\":\"one\",\"title\":\"Produto\",\"body\":\"Oferta\",\"priority\":2,\"promotionId\":1}";
+        mvc.perform(post("/internal/v1/notifications").header("X-Mottainai-Notification-Secret",publisher)
+            .contentType("application/json").content(body)).andExpect(status().isBadRequest());
+        assertFalse(redis.hasKey(stream));
+        assertNull(PromotionNotificationTarget.optional(null,null,null,null));
+        assertThrows(IllegalArgumentException.class,()->PromotionNotificationTarget.optional(1L,null,2L,1000L));
+        assertThrows(IllegalArgumentException.class,()->new PromotionNotificationTarget(1,2,3,1));
+    }
+
     private MapRecord<String, String, String> notificationRecord() {
         return MapRecord.create(stream, Map.of("company_id", Long.toString(company), "user_id", "10",
                 "title", "Alert", "body", "Body", "priority", "2"));

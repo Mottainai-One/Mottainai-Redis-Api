@@ -84,3 +84,5 @@ Execute `mvn verify` para os testes unitários. Para executar também os testes 
 - `mottainai-redis-cache` (`redis-cache:6379`, host `127.0.0.1:6382`): somente cache descartável; 128 MB, `allkeys-lru`, sem AOF ou snapshots. Usa uma senha própria. Apagar esse cache não deve afetar notificações ou controles.
 
 Copie `.env.redis.example` para `.env.redis`, configure as senhas e execute `docker compose --env-file .env.redis -f docker-compose.redis.yml up -d`. Em uma instalação nova, crie a rede e o volume externo antes. Em uma instalação existente, siga [a migração e o rollback](docs/redis-operations.md); não substitua o volume. A API continua usando `REDIS_URL` para a instância protegida. O cliente da IA deve enviar apenas o cache RAG por `REDIS_CACHE_URL` e `REDIS_CACHE_PASSWORD`, sem fallback para a instância protegida.
+
+Para destino de produto, unidades de data, vencimento e compatibilidade, consulte [avisos de promoções](docs/promotion-notifications.md).
